@@ -12,7 +12,7 @@ from config import DB_PATH, TICKERS, SCALES, PCT_WINDOWS, RZ_WINDOWS, HURST_ROC_
 import os
 import urllib.request
 
-DB_URL = "https://github.com/SistemaLinkResearch/dashboard-prototype.git"
+DB_URL = "https://github.com/SistemaLinkResearch/dashboard-prototype/releases/download/DB/research_programme.db"
 
 def ensure_db(local_path: Path, url: str):
     local_path.parent.mkdir(parents=True, exist_ok=True)
