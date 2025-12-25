@@ -348,7 +348,7 @@ use_symmetric = st.sidebar.checkbox(
 # ---------------------------
 # Layout
 # ---------------------------
-st.title("SistemaLink Research Programme — Streamlit Prototype")
+st.title("SLC Dahboard ")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["S&P 500 Price", "Hurst Percentiles", "Robust Z", "Hurst RoC", "IQR Strip"])
 
