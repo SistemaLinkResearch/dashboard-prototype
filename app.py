@@ -108,6 +108,7 @@ def load_hurst_roc(db_path: Path, ticker: str, horizon: int) -> pd.DataFrame:
     return df
 
 
+
 @st.cache_data(show_spinner=False)
 def load_iqr_scale_raw(db_path: Path, ticker: str) -> pd.DataFrame:
     """Load scale-wise IQR (agent disagreement) from iqr_metrics.
@@ -119,6 +120,33 @@ def load_iqr_scale_raw(db_path: Path, ticker: str) -> pd.DataFrame:
         """
         SELECT date, value
         FROM iqr_metrics
+        WHERE ticker=?
+          AND metric='scale_raw'
+          AND scale_label=''
+          AND duration_window=-1
+        ORDER BY date ASC;
+        """,
+        con,
+        params=(ticker,),
+    )
+    con.close()
+    df["date"] = pd.to_datetime(df["date"])
+    return df.set_index("date").sort_index()
+
+
+# Entropy strip loader
+@st.cache_data(show_spinner=False)
+def load_entropy_scale_raw(db_path: Path, ticker: str) -> pd.DataFrame:
+    """Load scale-wise entropy (agent disorder) from entropy_metrics.
+
+    Convention: scale_raw rows are stored with scale_label='' and duration_window=-1.
+    Values are normalized entropy in [0,1].
+    """
+    con = sqlite3.connect(db_path)
+    df = pd.read_sql_query(
+        """
+        SELECT date, value
+        FROM entropy_metrics
         WHERE ticker=?
           AND metric='scale_raw'
           AND scale_label=''
@@ -322,6 +350,45 @@ iqr_pct_window = st.sidebar.selectbox(
     help="Rolling lookback used to convert scale_raw IQR into a 0–100 percentile strip.",
 )
 
+
+smooth_iqr = st.sidebar.checkbox(
+    "Smooth IQR strip",
+    value=True,
+    help="Apply a moving-average smoother to the IQR percentile strip for readability.",
+)
+
+smooth_iqr_days = st.sidebar.slider(
+    "IQR smoothing (trading days)",
+    min_value=1,
+    max_value=30,
+    value=7,
+    step=1,
+    help="Moving-average window applied to the IQR percentile strip (1 = no smoothing).",
+)
+
+# Entropy strip sidebar controls
+entropy_pct_window = st.sidebar.selectbox(
+    "Entropy strip window (days)",
+    [63, 126, 189, 252],
+    index=3,
+    help="Rolling lookback used to convert scale_raw entropy into a 0–100 percentile strip.",
+)
+
+smooth_entropy = st.sidebar.checkbox(
+    "Smooth entropy strip",
+    value=True,
+    help="Apply a moving-average smoother to the entropy percentile strip for readability.",
+)
+
+smooth_entropy_days = st.sidebar.slider(
+    "Entropy smoothing (trading days)",
+    min_value=1,
+    max_value=60,
+    value=14,
+    step=1,
+    help="Moving-average window applied to the entropy percentile strip (1 = no smoothing).",
+)
+
 heatmap_freq = st.sidebar.selectbox(
     "Heatmap frequency",
     ["Daily", "Weekly", "Monthly"],
@@ -348,119 +415,194 @@ use_symmetric = st.sidebar.checkbox(
 # ---------------------------
 # Layout
 # ---------------------------
-st.title("SLC Dahboard ")
+st.title("SLC Research Programme")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["S&P 500 Price", "Hurst Percentiles", "Robust Z", "Hurst RoC", "IQR Strip"])
+# ---------------------------
+# Page sections (no tabs)
+# ---------------------------
 
-with tab1:
-    st.subheader("Price (Close)")
-    p = prices.loc[d0:d1].copy()
-    fig = px.line(p, y="close")
-    fig.update_layout(margin=dict(l=10, r=10, t=40, b=10))
-    st.plotly_chart(fig, use_container_width=True)
+# 1) Price
+st.subheader("1) Price (Close)")
+p = prices.loc[d0:d1].copy()
+fig = px.line(p, y="close")
+fig.update_layout(margin=dict(l=10, r=10, t=40, b=10))
+st.plotly_chart(fig, use_container_width=True)
 
-with tab2:
-    st.subheader(f"Hurst Percentiles (window={pct_window})")
-    df = load_hurst_pct(DB_PATH, ticker, pct_window)
-    df = df[(df["date"] >= d0) & (df["date"] <= d1)]
-    if df.empty:
-        st.warning("No percentile rows for this selection.")
-    else:
-        mat = to_heatmap(df, "pct")
-        mat = downsample_matrix(mat, heatmap_freq)
-        if mat.shape[0] > 2500:
-            st.info("Large date range selected; heatmap may be slow. Consider Weekly/Monthly frequency or shorter date range.")
+st.divider()
 
-        # Percentiles naturally live in [0,100]. Optional clipping improves contrast.
-        zlo, zhi = 0.0, 100.0
-        if clip_pct > 0:
-            lo, hi = robust_limits(mat.values, clip_pct, symmetric=False)
-            if lo is not None and hi is not None:
-                zlo = max(0.0, lo)
-                zhi = min(100.0, hi)
+# 2) Hurst Percentiles
+st.subheader(f"2) Hurst Percentiles (window={pct_window})")
+df = load_hurst_pct(DB_PATH, ticker, pct_window)
+df = df[(df["date"] >= d0) & (df["date"] <= d1)]
+if df.empty:
+    st.warning("No percentile rows for this selection.")
+else:
+    mat = to_heatmap(df, "pct")
+    mat = downsample_matrix(mat, heatmap_freq)
+    if mat.shape[0] > 2500:
+        st.info("Large date range selected; heatmap may be slow. Consider Weekly/Monthly frequency or shorter date range.")
 
-        st.plotly_chart(heatmap_figure(mat, "Percentile", zmin=zlo, zmax=zhi), use_container_width=True)
-        st.caption("Interpretation: higher = more persistent/trending relative to the last N days (duration tier).")
+    # Percentiles naturally live in [0,100]. Optional clipping improves contrast.
+    zlo, zhi = 0.0, 100.0
+    if clip_pct > 0:
+        lo, hi = robust_limits(mat.values, clip_pct, symmetric=False)
+        if lo is not None and hi is not None:
+            zlo = max(0.0, lo)
+            zhi = min(100.0, hi)
 
-with tab3:
-    st.subheader(f"Robust Z-score (window={rz_window})")
-    df = load_hurst_rz(DB_PATH, ticker, rz_window)
-    df = df[(df["date"] >= d0) & (df["date"] <= d1)]
-    if df.empty:
-        st.warning("No robust z rows for this selection.")
-    else:
-        mat = to_heatmap(df, "rz")
-        mat = downsample_matrix(mat, heatmap_freq)
-        if mat.shape[0] > 2500:
-            st.info("Large date range selected; heatmap may be slow. Consider Weekly/Monthly frequency or shorter date range.")
+    st.plotly_chart(heatmap_figure(mat, "Percentile", zmin=zlo, zmax=zhi), use_container_width=True)
+    st.caption("Interpretation: higher = more persistent/trending relative to the last N days (duration tier).")
 
-        zmin, zmax = robust_limits(mat.values, clip_pct, symmetric=use_symmetric)
-        if zmin is None or zmax is None:
-            zmin, zmax = -3.0, 3.0
+st.divider()
 
-        st.plotly_chart(heatmap_figure(mat, "Robust Z", zmin=zmin, zmax=zmax), use_container_width=True)
-        st.caption("Interpretation: distance from recent regime median (scaled by MAD). Big |z| suggests structural deviation.")
+# 3) Robust Z-score
+st.subheader(f"3) Robust Z-score (window={rz_window})")
+df = load_hurst_rz(DB_PATH, ticker, rz_window)
+df = df[(df["date"] >= d0) & (df["date"] <= d1)]
+if df.empty:
+    st.warning("No robust z rows for this selection.")
+else:
+    mat = to_heatmap(df, "rz")
+    mat = downsample_matrix(mat, heatmap_freq)
+    if mat.shape[0] > 2500:
+        st.info("Large date range selected; heatmap may be slow. Consider Weekly/Monthly frequency or shorter date range.")
 
-with tab4:
-    st.subheader(f"Hurst RoC (ΔH in % points over {roc_h} trading days)")
-    df = load_hurst_roc(DB_PATH, ticker, roc_h)
-    df = df[(df["date"] >= d0) & (df["date"] <= d1)]
-    if df.empty:
-        st.warning("No RoC rows for this selection.")
-    else:
-        mat = to_heatmap(df, "roc") * 100.0  # convert to percent points
-        mat = downsample_matrix(mat, heatmap_freq)
-        if mat.shape[0] > 2500:
-            st.info("Large date range selected; heatmap may be slow. Consider Weekly/Monthly frequency or shorter date range.")
+    zmin, zmax = robust_limits(mat.values, clip_pct, symmetric=use_symmetric)
+    if zmin is None or zmax is None:
+        zmin, zmax = -3.0, 3.0
 
-        zmin, zmax = robust_limits(mat.values, clip_pct, symmetric=use_symmetric)
-        st.plotly_chart(heatmap_figure(mat, f"RoC (% points over {roc_h}d)", zmin=zmin, zmax=zmax), use_container_width=True)
+    st.plotly_chart(heatmap_figure(mat, "Robust Z", zmin=zmin, zmax=zmax), use_container_width=True)
+    st.caption("Interpretation: distance from recent regime median (scaled by MAD). Big |z| suggests structural deviation.")
 
-        latest = mat.dropna(how="all").iloc[-1].rename("latest").to_frame()
-        st.write("Latest RoC by scale (% points)")
-        st.dataframe(latest.T, use_container_width=True)
+st.divider()
 
-with tab5:
-    st.subheader("Agent Disagreement Strip (scale-wise IQR)")
+# 4) Hurst RoC
+st.subheader(f"4) Hurst RoC (ΔH in % points over {roc_h} trading days)")
+df = load_hurst_roc(DB_PATH, ticker, roc_h)
+df = df[(df["date"] >= d0) & (df["date"] <= d1)]
+if df.empty:
+    st.warning("No RoC rows for this selection.")
+else:
+    mat = to_heatmap(df, "roc") * 100.0  # convert to percent points
+    mat = downsample_matrix(mat, heatmap_freq)
+    if mat.shape[0] > 2500:
+        st.info("Large date range selected; heatmap may be slow. Consider Weekly/Monthly frequency or shorter date range.")
 
-    df_full = load_iqr_scale_raw(DB_PATH, ticker)
+    zmin, zmax = robust_limits(mat.values, clip_pct, symmetric=use_symmetric)
+    st.plotly_chart(heatmap_figure(mat, f"RoC (% points over {roc_h}d)", zmin=zmin, zmax=zmax), use_container_width=True)
 
-    if df_full.empty:
-        st.warning("No iqr_metrics rows found for metric='scale_raw'. Run Step 7 to populate iqr_metrics.")
-    else:
-        # Compute percentile on the FULL history so the chosen date range only affects what is shown,
-        # while the percentile window defines the local memory used for ranking.
-        pct_full = rolling_percentile_series(df_full["value"], window=int(iqr_pct_window))
+    latest = mat.dropna(how="all").iloc[-1].rename("latest").to_frame()
+    st.write("Latest RoC by scale (% points)")
+    st.dataframe(latest.T, use_container_width=True)
 
-        # Now apply the UI date filter for display
-        df = df_full.loc[d0:d1]
-        pct = pct_full.loc[d0:d1].dropna()
+st.divider()
 
-        if pct.empty:
-            st.info(
-                "Not enough pre-history inside the selected date range to compute rolling percentiles. "
-                "Try an earlier start date or a shorter IQR strip window."
-            )
-        else:
-            st.plotly_chart(
-                regime_strip_figure(pct, f"{ticker} — scale_raw IQR percentile ({iqr_pct_window}d)"),
-                use_container_width=True,
-            )
+# 5) IQR Strip
+st.subheader("5) Agent Disagreement Strip (scale-wise IQR)")
 
-        c1, c2, c3 = st.columns(3)
-        if not pct.empty:
-            c1.metric("Latest percentile", f"{pct.iloc[-1]:.1f}")
-        else:
-            c1.metric("Latest percentile", "—")
+df_full = load_iqr_scale_raw(DB_PATH, ticker)
 
-        if not df.empty and df["value"].dropna().size > 0:
-            c2.metric("Latest raw IQR", f"{df['value'].dropna().iloc[-1]:.4f}")
-            c3.metric("Max raw IQR (range)", f"{df['value'].max():.4f}")
-        else:
-            c2.metric("Latest raw IQR", "—")
-            c3.metric("Max raw IQR (range)", "—")
+if df_full.empty:
+    st.warning("No iqr_metrics rows found for metric='scale_raw'. Run Step 7 to populate iqr_metrics.")
+else:
+    # Compute percentile on the FULL history so the chosen date range only affects what is shown,
+    # while the percentile window defines the local memory used for ranking.
+    pct_full = rolling_percentile_series(df_full["value"], window=int(iqr_pct_window))
 
-        st.caption(
-            "Interpretation: this is the percentile rank of today’s cross-scale Hurst dispersion (agent disagreement) versus the last N days. "
-            "High = unusually fractured cross-horizon structure; low = unusually coherent."
+    # Now apply the UI date filter for display
+    df = df_full.loc[d0:d1]
+    pct = pct_full.loc[d0:d1].dropna()
+    pct_plot = pct
+    if smooth_iqr and not pct.empty and int(smooth_iqr_days) > 1:
+        pct_plot = pct.rolling(int(smooth_iqr_days), min_periods=1).mean()
+
+    if pct.empty:
+        st.info(
+            "Not enough pre-history inside the selected date range to compute rolling percentiles. "
+            "Try an earlier start date or a shorter IQR strip window."
         )
+    else:
+        st.plotly_chart(
+            regime_strip_figure(pct_plot, f"{ticker} — scale_raw IQR percentile ({iqr_pct_window}d)"),
+            use_container_width=True,
+        )
+
+    c1, c2, c3, c4 = st.columns(4)
+    if not pct.empty:
+        c1.metric("Latest percentile", f"{pct.iloc[-1]:.1f}")
+    else:
+        c1.metric("Latest percentile", "—")
+
+    if not df.empty and df["value"].dropna().size > 0:
+        c2.metric("Latest raw IQR", f"{df['value'].dropna().iloc[-1]:.4f}")
+        c3.metric("Max raw IQR (range)", f"{df['value'].max():.4f}")
+    else:
+        c2.metric("Latest raw IQR", "—")
+        c3.metric("Max raw IQR (range)", "—")
+
+    if smooth_iqr and not pct_plot.empty:
+        c4.metric("Latest percentile (smoothed)", f"{pct_plot.iloc[-1]:.1f}")
+    else:
+        c4.metric("Latest percentile (smoothed)", "—")
+
+
+    st.caption(
+        "Interpretation: this is the percentile rank of today’s cross-scale Hurst dispersion (agent disagreement) versus the last N days. "
+        "High = unusually fractured cross-horizon structure; low = unusually coherent."
+    )
+
+
+st.divider()
+
+# 6) Entropy Strip
+st.subheader("6) Agent Disorder Strip (scale-wise Entropy)")
+
+df_full = load_entropy_scale_raw(DB_PATH, ticker)
+
+if df_full.empty:
+    st.warning("No entropy_metrics rows found for metric='scale_raw'. Run Step 8 to populate entropy_metrics.")
+else:
+    # Convert normalized entropy (0..1) into a rolling percentile strip (0..100)
+    pct_full = rolling_percentile_series(df_full["value"], window=int(entropy_pct_window))
+
+    # Apply UI date filter for display
+    df = df_full.loc[d0:d1]
+    pct = pct_full.loc[d0:d1].dropna()
+
+    pct_plot = pct
+    if smooth_entropy and not pct.empty and int(smooth_entropy_days) > 1:
+        pct_plot = pct.rolling(int(smooth_entropy_days), min_periods=1).mean()
+
+    if pct.empty:
+        st.info(
+            "Not enough pre-history inside the selected date range to compute rolling percentiles. "
+            "Try an earlier start date or a shorter entropy strip window."
+        )
+    else:
+        st.plotly_chart(
+            regime_strip_figure(pct_plot, f"{ticker} — scale_raw entropy percentile ({entropy_pct_window}d)"),
+            use_container_width=True,
+        )
+
+    c1, c2, c3, c4 = st.columns(4)
+    if not pct.empty:
+        c1.metric("Latest percentile", f"{pct.iloc[-1]:.1f}")
+    else:
+        c1.metric("Latest percentile", "—")
+
+    if not df.empty and df["value"].dropna().size > 0:
+        c2.metric("Latest raw entropy", f"{df['value'].dropna().iloc[-1]:.4f}")
+        c3.metric("Max raw entropy (range)", f"{df['value'].max():.4f}")
+    else:
+        c2.metric("Latest raw entropy", "—")
+        c3.metric("Max raw entropy (range)", "—")
+
+    if smooth_entropy and not pct_plot.empty:
+        c4.metric("Latest percentile (smoothed)", f"{pct_plot.iloc[-1]:.1f}")
+    else:
+        c4.metric("Latest percentile (smoothed)", "—")
+
+    st.caption(
+        "Interpretation: this is the percentile rank of today’s scale-wise entropy (how disordered the cross-agent Hurst configuration is) versus the last N days. "
+        "High = unusually scattered agent structure; low = unusually ordered/coherent structure."
+    )
