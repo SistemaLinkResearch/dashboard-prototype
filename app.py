@@ -9,6 +9,19 @@ import streamlit as st
 
 from config import DB_PATH, TICKERS, SCALES, PCT_WINDOWS, RZ_WINDOWS, HURST_ROC_HORIZONS, MIN_ROLLING_WINDOW
 
+import os
+import urllib.request
+
+DB_URL = "https://github.com/SistemaLinkResearch/dashboard-prototype.git"
+
+def ensure_db(local_path: Path, url: str):
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    if local_path.exists() and local_path.stat().st_size > 10_000_000:
+        return
+    urllib.request.urlretrieve(url, local_path)
+
+ensure_db(DB_PATH, DB_URL)
+
 # Custom diverging colorscale (SistemaLink style)
 SISTEMALINK_COLORSCALE = [
     [0.00, "#7F2020"],
